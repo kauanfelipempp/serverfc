@@ -11,17 +11,17 @@ const fs = require('fs');
 const nodemailer = require('nodemailer');
 const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
 
-// --- NOVAS IMPORTAÇÕES PARA CLOUDINARY ---
+// --- CONFIGURAÇÕES DE CLOUDINARY E MULTER ---
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
-
-// --- CONFIGURAÇÃO MERCADO PAGO ---
-const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET;
 
-// --- CONFIGURAÇÃO CLOUDINARY ---
+// Configuração Mercado Pago
+const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
+
+// Configuração Cloudinary
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_NAME,
     api_key: process.env.CLOUDINARY_KEY,
@@ -42,12 +42,12 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// --- CONEXÃO MONGODB ATLAS ---
+// --- CONEXÃO MONGODB ---
 mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("✅ MongoDB Conectado"))
-    .catch(err => console.error("❌ Erro Mongo:", err));
+    .then(() => console.log("✅ MongoDB Conectado com Sucesso"))
+    .catch(err => console.error("❌ Erro ao conectar no Mongo:", err));
 
-// --- CONFIGURAÇÃO DE EMAIL ---
+// --- CONFIGURAÇÃO DE EMAIL (Transporter) ---
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -56,7 +56,7 @@ const transporter = nodemailer.createTransport({
     }
 });
 
-// --- SCHEMAS ---
+// --- SCHEMAS (Modelos de Dados) ---
 const User = mongoose.model('User', new mongoose.Schema({
     nome: String,
     email: { type: String, unique: true, required: true },
@@ -68,7 +68,7 @@ const Product = mongoose.model('Product', new mongoose.Schema({
     name: { type: String, required: true },
     price: { type: Number, required: true },
     image: { type: String, required: true },
-    description: String,
+    description: String, // Usado como categoria nos produtos
     sizes: [String],
     colors: [String],
     createdAt: { type: Date, default: Date.now }
@@ -101,41 +101,75 @@ const Order = mongoose.model('Order', new mongoose.Schema({
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
 function verifyAdmin(req, res, next) {
     const token = req.headers['authorization'];
-    if (!token) return res.status(401).json({ error: "Acesso negado" });
+    if (!token) return res.status(401).json({ error: "Acesso negado. Token não fornecido." });
     try {
         const decoded = jwt.verify(token, JWT_SECRET);
         if (decoded.isAdmin) {
             req.user = decoded;
             next();
         } else {
-            res.status(403).json({ error: "Não autorizado" });
+            res.status(403).json({ error: "Acesso proibido. Requer privilégios de admin." });
         }
     } catch (e) {
-        res.status(400).json({ error: "Token inválido" });
+        res.status(400).json({ error: "Token inválido ou expirado." });
     }
 }
 
-// --- ROTAS DE PRODUTOS ---
+// --- ROTAS DE CATEGORIAS (Unificadas) ---
+app.get('/api/categories', async (req, res) => {
+    try {
+        const categories = await Category.find().sort({ order: 1 });
+        res.json(categories);
+    } catch (e) {
+        res.status(500).json({ error: "Erro ao buscar categorias" });
+    }
+});
 
+app.post('/api/categories', verifyAdmin, async (req, res) => {
+    try {
+        const cat = new Category(req.body);
+        await cat.save();
+        res.status(201).json(cat);
+    } catch (e) {
+        res.status(400).json({ error: "Erro ao criar categoria" });
+    }
+});
+
+app.delete('/api/categories/:id', verifyAdmin, async (req, res) => {
+    try {
+        await Category.findByIdAndDelete(req.params.id);
+        res.json({ message: "Categoria removida com sucesso" });
+    } catch (e) {
+        res.status(400).json({ error: "Erro ao deletar categoria" });
+    }
+});
+
+// --- ROTAS DE PRODUTOS ---
 app.get('/api/products', async (req, res) => {
     try {
         const products = await Product.find().sort({ createdAt: -1 });
-        const mapped = products.map(p => ({
-            _id: p._id,
-            nome: p.name,
-            preco: p.price,
-            imagem: p.image, // Retorna a URL direta do Cloudinary
-            sizes: p.sizes || [],
-            colors: p.colors || [],
-            categoria: p.description || ""
-        }));
+        const mapped = products.map(p => {
+            let finalImage = p.image;
+            if (p.image && !p.image.startsWith('http')) {
+                const cleanPath = p.image.replace(/\\/g, '/');
+                finalImage = `https://serverfc.onrender.com/${cleanPath}`;
+            }
+            return {
+                _id: p._id,
+                nome: p.name,
+                preco: p.price,
+                imagem: finalImage,
+                sizes: p.sizes || [],
+                colors: p.colors || [],
+                categoria: p.description || ""
+            };
+        });
         res.json(mapped);
     } catch (e) {
         res.status(500).json([]);
     }
 });
 
-// Rota corrigida para receber upload e dados do produto simultaneamente
 app.post('/api/products', verifyAdmin, upload.single('imagem'), async (req, res) => {
     try {
         const { nome, preco, categoria, sizes, colors } = req.body;
@@ -153,21 +187,25 @@ app.post('/api/products', verifyAdmin, upload.single('imagem'), async (req, res)
         await novoProduto.save();
         res.json({ success: true, produto: novoProduto });
     } catch (e) {
-        console.error(e);
         res.status(500).json({ error: "Erro ao criar produto" });
     }
 });
 
-app.put('/api/products/:id', verifyAdmin, async (req, res) => {
+app.put('/api/products/:id', verifyAdmin, upload.single('imagem'), async (req, res) => {
     try {
-        const atualizado = await Product.findByIdAndUpdate(req.params.id, {
-            name: req.body.nome,
-            price: req.body.preco,
-            image: req.body.imagem,
-            description: req.body.categoria,
-            sizes: req.body.sizes,
-            colors: req.body.colors
-        }, { new: true });
+        const { nome, preco, categoria, sizes, colors } = req.body;
+        const imageUrl = req.file ? req.file.path : req.body.image;
+
+        const dadosAtualizados = {
+            name: nome,
+            price: Number(preco),
+            description: categoria,
+            sizes: typeof sizes === 'string' ? JSON.parse(sizes) : sizes,
+            colors: typeof colors === 'string' ? JSON.parse(colors) : colors,
+            image: imageUrl
+        };
+
+        const atualizado = await Product.findByIdAndUpdate(req.params.id, dadosAtualizados, { new: true });
         res.json({ message: "Produto atualizado!", produto: atualizado });
     } catch (e) {
         res.status(500).json({ error: "Erro ao atualizar" });
@@ -183,44 +221,17 @@ app.delete('/api/products/:id', verifyAdmin, async (req, res) => {
     }
 });
 
-// --- RESTANTE DAS ROTAS (CATEGORIAS, AUTH, CUPONS, CHECKOUT) ---
-
-app.get('/api/categories', async (req, res) => {
-    try {
-        const categories = await Category.find().sort({ order: 1 });
-        res.json(categories);
-    } catch (e) {
-        res.status(500).json({ error: "Erro ao buscar categorias" });
-    }
-});
-
-app.post('/api/categories', verifyAdmin, async (req, res) => {
-    try {
-        const cat = new Category(req.body);
-        await cat.save();
-        res.json(cat);
-    } catch (e) {
-        res.status(400).json({ error: "Erro ao criar categoria" });
-    }
-});
-
-app.delete('/api/categories/:id', verifyAdmin, async (req, res) => {
-    try {
-        await Category.findByIdAndDelete(req.params.id);
-        res.json({ message: "Categoria removida" });
-    } catch (e) {
-        res.status(400).json({ error: "Erro ao deletar" });
-    }
-});
-
+// --- ROTAS DE USUÁRIO E AUTENTICAÇÃO ---
 app.post('/api/register', async (req, res) => {
     try {
         const { nome, email, senha } = req.body;
         const hash = await bcrypt.hash(senha, 10);
         const user = new User({ nome, email, senha: hash });
         await user.save();
-        res.status(201).json({ message: "Registrado!" });
-    } catch (e) { res.status(400).json({ error: "Email já cadastrado" }); }
+        res.status(201).json({ message: "Registrado com sucesso!" });
+    } catch (e) {
+        res.status(400).json({ error: "Email já cadastrado" });
+    }
 });
 
 app.post('/api/login', async (req, res) => {
@@ -233,7 +244,9 @@ app.post('/api/login', async (req, res) => {
         } else {
             res.status(401).json({ error: "Credenciais inválidas" });
         }
-    } catch (e) { res.status(500).json({ error: "Erro interno" }); }
+    } catch (e) {
+        res.status(500).json({ error: "Erro interno no servidor" });
+    }
 });
 
 app.get('/api/users', verifyAdmin, async (req, res) => {
@@ -241,6 +254,7 @@ app.get('/api/users', verifyAdmin, async (req, res) => {
     res.json(users);
 });
 
+// --- CUPONS E FRETE ---
 app.post('/api/coupons', verifyAdmin, async (req, res) => {
     try {
         const novo = new Coupon(req.body);
@@ -275,7 +289,6 @@ app.post('/api/shipping', async (req, res) => {
 });
 
 // --- CHECKOUT E MERCADO PAGO ---
-
 app.post('/api/checkout', async (req, res) => {
     try {
         const { cliente, itens, total, frete, desconto } = req.body;
@@ -307,9 +320,9 @@ app.post('/api/checkout', async (req, res) => {
                 shipments: { cost: Number(frete), mode: 'not_specified' },
                 payer: { name: cliente.nome, email: cliente.email },
                 back_urls: {
-                    success: "https://youtube.com",
-                    failure: "https://youtube.com",
-                    pending: "https://youtube.com"
+                    success: "https://www.fatalcompany.store/backurl/sucesso.html",
+                    failure: "https://www.fatalcompany.store/backurl/erro.html",
+                    pending: "https://www.fatalcompany.store/backurl/pendente.html"
                 },
                 auto_return: "approved",
                 external_reference: externalReference,
@@ -338,7 +351,7 @@ app.post('/api/checkout', async (req, res) => {
             html: `
                 <div style="background:#111; color:#fff; padding:20px; font-family:sans-serif;">
                     <h2 style="color:#00bfff;">Pedido Recebido!</h2>
-                    <p>Olá ${cliente.nome}, clique no link abaixo para pagar.</p>
+                    <p>Olá ${cliente.nome}, clique no link abaixo para realizar o pagamento.</p>
                     <a href="${mpResponse.init_point}" style="background:#00bfff; color:white; padding:10px 20px; text-decoration:none; display:inline-block; margin:20px 0;">PAGAR AGORA</a>
                     <hr style="border:1px solid #333;">
                     <ul>${listaItens}</ul>
@@ -350,7 +363,7 @@ app.post('/api/checkout', async (req, res) => {
 
     } catch (e) {
         console.error("Erro MP:", e);
-        res.status(500).json({ error: "Erro no checkout" });
+        res.status(500).json({ error: "Erro ao processar checkout" });
     }
 });
 
@@ -377,7 +390,7 @@ app.post('/api/webhook', async (req, res) => {
                     subject: 'Pagamento Aprovado! 🚀',
                     html: `<div style="background:#111; color:#fff; padding:20px; font-family:sans-serif;">
                             <h2 style="color:#00ff00;">Pagamento Confirmado!</h2>
-                            <p>Olá <strong>${cliente.nome}</strong>, seu pedido #${pedidoAtualizado._id.toString().slice(-6).toUpperCase()} está em preparação.</p>
+                            <p>Olá <strong>${cliente.nome}</strong>, seu pedido #${pedidoAtualizado._id.toString().slice(-6).toUpperCase()} está sendo preparado.</p>
                         </div>`
                 }).catch(err => console.error("Erro email webhook:", err));
             }
@@ -389,18 +402,19 @@ app.post('/api/webhook', async (req, res) => {
     }
 });
 
+// --- GESTÃO DE PEDIDOS (ADMIN) ---
 app.get('/api/orders', verifyAdmin, async (req, res) => {
     try {
         const orders = await Order.find().sort({ data: -1 });
         res.json(orders);
-    } catch (e) { res.status(500).json({ error: "Erro carregar pedidos" }); }
+    } catch (e) { res.status(500).json({ error: "Erro ao carregar pedidos" }); }
 });
 
 app.put('/api/orders/:id/status', verifyAdmin, async (req, res) => {
     try {
         const { status, trackingCode } = req.body;
         const pedido = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true });
-        if (!pedido) return res.status(404).json({ error: "Não encontrado" });
+        if (!pedido) return res.status(404).json({ error: "Pedido não encontrado" });
 
         if (status === 'Enviado') {
             const cliente = pedido.cliente;
@@ -409,15 +423,18 @@ app.put('/api/orders/:id/status', verifyAdmin, async (req, res) => {
                 to: cliente.email,
                 subject: 'Pedido Enviado! 🚚',
                 html: `<div style="background:#050505; color:#fff; padding:30px; font-family:sans-serif; text-align:center;">
-                        <h2>PEDIDO ENVIADO</h2>
-                        <p>Rastreio: <strong>${trackingCode || 'Disponível em breve'}</strong></p>
+                        <h2>SEU PEDIDO FOI ENVIADO!</h2>
+                        <p>Código de Rastreio: <strong>${trackingCode || 'Será atualizado em breve'}</strong></p>
                     </div>`
             }).catch(e => console.error(e));
         }
         res.json({ success: true, status });
-    } catch (e) { res.status(500).json({ error: "Erro status" }); }
+    } catch (e) { res.status(500).json({ error: "Erro ao atualizar status" }); }
 });
 
-// --- INICIALIZAÇÃO ---
+// --- INICIALIZAÇÃO DO SERVIDOR ---
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🔥 Servidor ON na porta ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`🔥 Servidor Rodando na porta ${PORT}`);
+    console.log(`📌 Endpoints de Categoria e Produtos Ativados.`);
+});
