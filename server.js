@@ -68,7 +68,7 @@ const Product = mongoose.model('Product', new mongoose.Schema({
     name: { type: String, required: true },
     price: { type: Number, required: true },
     image: { type: String, required: true },
-    description: String, // Usado como categoria nos produtos
+    categoria: String, // Usado como categoria nos produtos
     sizes: [String],
     colors: [String],
     createdAt: { type: Date, default: Date.now }
@@ -76,7 +76,7 @@ const Product = mongoose.model('Product', new mongoose.Schema({
 
 const Category = mongoose.model('Category', new mongoose.Schema({
     title: { type: String, required: true },
-    description: String,
+    categoria: String,
     order: { type: Number, default: 0 }
 }));
 
