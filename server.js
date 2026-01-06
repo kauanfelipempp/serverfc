@@ -116,6 +116,41 @@ function verifyAdmin(req, res, next) {
 }
 
 // --- ROTAS DE CATEGORIAS (Unificadas) ---
+// --- ROTA PÚBLICA DE RASTREIO (Adicione aqui) ---
+// Esta rota permite que o cliente veja o status sem precisar de login
+app.get('/api/public/orders/:id', async (req, res) => {
+    try {
+        // Procura o pedido pelo ID (o código que o cliente digita)
+        const pedido = await Order.findById(req.params.id);
+
+        if (!pedido) {
+            return res.status(404).json({ error: "Pedido não encontrado" });
+        }
+
+        // Retornamos apenas os dados seguros para o cliente ver
+        res.json({
+            _id: pedido._id,
+            status: pedido.status,
+            data: pedido.data,
+            cliente: {
+                nome: pedido.cliente.nome
+            },
+            itens: pedido.itens.map(i => ({
+                nome: i.nome,
+                qty: i.qty,
+                size: i.size,
+                color: i.color
+            })),
+            total: pedido.total
+        });
+    } catch (e) {
+        // Se o ID for inválido (menos caracteres que o padrão do Mongo), cai aqui
+        res.status(400).json({ error: "Código de pedido inválido" });
+    }
+});
+
+
+
 app.get('/api/categories', async (req, res) => {
     try {
         const categories = await Category.find().sort({ order: 1 });
