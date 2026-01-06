@@ -68,7 +68,7 @@ const Product = mongoose.model('Product', new mongoose.Schema({
     name: { type: String, required: true },
     price: { type: Number, required: true },
     image: { type: String, required: true },
-    categoria: String, // Usado como categoria nos produtos
+    categoria: String,
     sizes: [String],
     colors: [String],
     createdAt: { type: Date, default: Date.now }
@@ -95,7 +95,8 @@ const Order = mongoose.model('Order', new mongoose.Schema({
     desconto: Number,
     total: Number,
     data: { type: Date, default: Date.now },
-    status: { type: String, default: 'Pendente' }
+    status: { type: String, default: 'Pendente' },
+    trackingCode: { type: String, default: '' } // Adicionado para suportar rastreio
 }));
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
@@ -115,66 +116,46 @@ function verifyAdmin(req, res, next) {
     }
 }
 
-// --- ROTAS DE CATEGORIAS (Unificadas) ---
-// ROTA PÚBLICA DE RASTREIO
-// Esta rota não precisa de "verifyAdmin" para o cliente poder usar
+// --- ROTA PÚBLICA DE RASTREIO (MELHORADA) ---
 app.get('/api/public/orders/:id', async (req, res) => {
     try {
-        const pedido = await Order.findById(req.params.id);
+        const queryId = req.params.id;
 
+        // 1. Tenta buscar pelo ID exato
+        let pedido = await Order.findById(queryId);
+
+        // 2. Se não achar, tenta buscar pelos últimos caracteres (Regex)
         if (!pedido) {
-            return res.status(404).json({ error: "Pedido não encontrado" });
+            pedido = await Order.findOne({
+                _id: { $regex: queryId + "$", $options: 'i' }
+            });
         }
 
-        // Retorna apenas o que o cliente precisa ver (segurança)
+        if (!pedido) {
+            return res.status(404).json({ error: "Pedido não encontrado." });
+        }
+
+        // Retorna apenas dados necessários por segurança
         res.json({
             _id: pedido._id,
             status: pedido.status,
             data: pedido.data,
             cliente: { nome: pedido.cliente.nome },
-            itens: pedido.itens,
-            total: pedido.total,
-            trackingCode: pedido.trackingCode // Se você tiver esse campo
-        });
-    } catch (e) {
-        // Se o ID digitado não for um ID válido do MongoDB, ele cai aqui
-        res.status(404).json({ error: "Código de pedido inválido ou não encontrado" });
-    }
-});
-// Esta rota permite que o cliente veja o status sem precisar de login
-app.get('/api/public/orders/:id', async (req, res) => {
-    try {
-        // Procura o pedido pelo ID (o código que o cliente digita)
-        const pedido = await Order.findById(req.params.id);
-
-        if (!pedido) {
-            return res.status(404).json({ error: "Pedido não encontrado" });
-        }
-
-        // Retornamos apenas os dados seguros para o cliente ver
-        res.json({
-            _id: pedido._id,
-            status: pedido.status,
-            data: pedido.data,
-            cliente: {
-                nome: pedido.cliente.nome
-            },
             itens: pedido.itens.map(i => ({
                 nome: i.nome,
                 qty: i.qty,
                 size: i.size,
                 color: i.color
             })),
-            total: pedido.total
+            total: pedido.total,
+            trackingCode: pedido.trackingCode || null
         });
     } catch (e) {
-        // Se o ID for inválido (menos caracteres que o padrão do Mongo), cai aqui
-        res.status(400).json({ error: "Código de pedido inválido" });
+        res.status(400).json({ error: "Código de pedido inválido ou erro na busca." });
     }
 });
 
-
-
+// --- ROTAS DE CATEGORIAS ---
 app.get('/api/categories', async (req, res) => {
     try {
         const categories = await Category.find().sort({ order: 1 });
@@ -220,7 +201,7 @@ app.get('/api/products', async (req, res) => {
                 imagem: finalImage,
                 sizes: p.sizes || [],
                 colors: p.colors || [],
-                categoria: p.description || ""
+                categoria: p.categoria || ""
             };
         });
         res.json(mapped);
@@ -238,7 +219,7 @@ app.post('/api/products', verifyAdmin, upload.single('imagem'), async (req, res)
             name: nome,
             price: Number(preco),
             image: imageUrl,
-            description: categoria,
+            categoria: categoria,
             sizes: JSON.parse(sizes || "[]"),
             colors: JSON.parse(colors || "[]")
         });
@@ -258,7 +239,7 @@ app.put('/api/products/:id', verifyAdmin, upload.single('imagem'), async (req, r
         const dadosAtualizados = {
             name: nome,
             price: Number(preco),
-            description: categoria,
+            categoria: categoria,
             sizes: typeof sizes === 'string' ? JSON.parse(sizes) : sizes,
             colors: typeof colors === 'string' ? JSON.parse(colors) : colors,
             image: imageUrl
@@ -472,7 +453,9 @@ app.get('/api/orders', verifyAdmin, async (req, res) => {
 app.put('/api/orders/:id/status', verifyAdmin, async (req, res) => {
     try {
         const { status, trackingCode } = req.body;
-        const pedido = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true });
+        // Atualiza tanto o status quanto o trackingCode no banco
+        const pedido = await Order.findByIdAndUpdate(req.params.id, { status, trackingCode }, { new: true });
+
         if (!pedido) return res.status(404).json({ error: "Pedido não encontrado" });
 
         if (status === 'Enviado') {
@@ -483,11 +466,12 @@ app.put('/api/orders/:id/status', verifyAdmin, async (req, res) => {
                 subject: 'Pedido Enviado! 🚚',
                 html: `<div style="background:#050505; color:#fff; padding:30px; font-family:sans-serif; text-align:center;">
                         <h2>SEU PEDIDO FOI ENVIADO!</h2>
-                        <p>Código de Rastreio: <strong>${trackingCode || 'Será atualizado em breve'}</strong></p>
+                        <p>Código de Rastreio: <strong>${trackingCode || 'Disponível no painel'}</strong></p>
+                        <p>Use este código para acompanhar sua entrega.</p>
                     </div>`
             }).catch(e => console.error(e));
         }
-        res.json({ success: true, status });
+        res.json({ success: true, status, trackingCode });
     } catch (e) { res.status(500).json({ error: "Erro ao atualizar status" }); }
 });
 
@@ -495,5 +479,4 @@ app.put('/api/orders/:id/status', verifyAdmin, async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🔥 Servidor Rodando na porta ${PORT}`);
-    console.log(`📌 Endpoints de Categoria e Produtos Ativados.`);
 });
